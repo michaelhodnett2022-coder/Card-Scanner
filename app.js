@@ -1,175 +1,195 @@
-// Business card capture -> OCR -> editable contact form -> vCard save.
+// On-device OCR (Tesseract.js, vendored locally) plus heuristics that turn
+// raw recognized text from a business card into structured contact fields.
+// The worker/library code ships with the app; only the WASM engine and the
+// English language model are fetched on first use (and cached by Tesseract.js
+// for offline reuse afterwards).
 
-const CardScanner = (() => {
-  let capturedCanvas = null;
-  let photoBase64Full = ''; // for on-screen preview
-  let photoBase64Jpeg = ''; // raw base64 (no data: prefix) embedded in the vCard
+const OCR = {
+  _worker: null,
 
-  const els = {};
-  function cacheEls() {
-    els.video = document.getElementById('card-video');
-    els.stepCapture = document.getElementById('card-step-capture');
-    els.stepReview = document.getElementById('card-step-review');
-    els.shutter = document.getElementById('card-shutter');
-    els.pickFile = document.getElementById('card-pick-file');
-    els.fileInput = document.getElementById('card-file-input');
-    els.camStatus = document.getElementById('card-cam-status');
-    els.photoImg = document.getElementById('card-photo-img');
-    els.rawToggle = document.getElementById('card-raw-toggle');
-    els.rawText = document.getElementById('card-raw-text');
-    els.saveBtn = document.getElementById('card-save-btn');
-    els.retakeBtn = document.getElementById('card-retake-btn');
-  }
-
-  async function start() {
-    cacheEls();
-    resetToCapture();
-    els.camStatus.textContent = 'Starting camera…';
-    const ok = await Camera.start(els.video);
-    els.camStatus.textContent = ok ? '' : 'Camera unavailable — use the photo picker instead.';
-  }
-
-  function resetToCapture() {
-    els.stepCapture.style.display = 'block';
-    els.stepReview.style.display = 'none';
-  }
-
-  function reset() {
-    Camera.stop();
-    capturedCanvas = null;
-    if (els.stepCapture) resetToCapture();
-  }
-
-  async function handleCanvas(canvas) {
-    Camera.stop();
-    capturedCanvas = canvas;
-    photoBase64Full = canvas.toDataURL('image/jpeg', 0.85);
-    els.photoImg.src = photoBase64Full;
-
-    els.stepCapture.style.display = 'none';
-    els.stepReview.style.display = 'flex';
-    els.rawText.classList.remove('show');
-    els.rawToggle.textContent = 'Show recognized text';
-
-    showOverlay('Reading card… 0%');
-    try {
-      const thumb = downscaleCanvas(canvas, 640);
-      photoBase64Jpeg = thumb.toDataURL('image/jpeg', 0.7).split(',')[1];
-
-      const text = await OCR.recognize(canvas, (p) => {
-        showOverlay(`Reading card… ${Math.round(p * 100)}%`);
+  async recognize(canvasOrImage, onProgress) {
+    if (!window.Tesseract) {
+      await loadScript('js/vendor/tesseract.min.js');
+    }
+    if (!this._worker) {
+      this._worker = await Tesseract.createWorker('eng', 1, {
+        workerPath: 'js/vendor/worker.min.js',
+        logger: m => {
+          if (onProgress && m.status === 'recognizing text') onProgress(m.progress);
+        }
       });
-      const fields = extractContact(text);
-      fillForm(fields);
-      els.rawText.textContent = text.trim() || '(no text recognized)';
-    } catch (err) {
-      console.error(err);
-      toast('Could not read text automatically — please fill fields manually.');
-    } finally {
-      hideOverlay();
+    }
+    const { data } = await this._worker.recognize(canvasOrImage);
+    return data.text;
+  }
+};
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// ---------- Business card field extraction ----------
+
+const TITLE_WORDS = [
+  'manager', 'director', 'president', 'ceo', 'cfo', 'coo', 'cto', 'founder',
+  'owner', 'sales', 'engineer', 'consultant', 'representative', 'executive',
+  'partner', 'principal', 'coordinator', 'specialist', 'analyst', 'officer',
+  'lead', 'head of', 'vice president', 'vp ', 'supervisor', 'technician',
+  'administrator', 'accountant', 'architect', 'designer', 'developer'
+];
+const COMPANY_WORDS = [
+  'pty', 'ltd', 'llc', 'inc', 'co.', 'corp', 'group', 'company', 'holdings',
+  'enterprises', 'solutions', 'services', 'industries', 'partners'
+];
+const AU_STATES = ['NSW', 'VIC', 'QLD', 'WA', 'SA', 'TAS', 'ACT', 'NT'];
+
+function extractContact(rawText) {
+  const lines = rawText
+    .split('\n')
+    .map(l => l.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  const emailMatch = rawText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  const email = emailMatch ? emailMatch[0].replace(/^[^a-zA-Z0-9]+/, '') : '';
+
+  const phoneMatches = [...rawText.matchAll(/(\+?\(?\d[\d\s().-]{6,}\d)/g)]
+    .map(m => m[0].trim())
+    .filter(p => p.replace(/\D/g, '').length >= 7 && p.replace(/\D/g, '').length <= 15);
+  const phones = dedupe(phoneMatches);
+
+  const urlMatch = rawText.match(/\b((https?:\/\/)?(www\.)?[a-zA-Z0-9-]+\.(com|net|org|com\.au|net\.au|org\.au|io|co)(\.[a-z]{2})?(\/\S*)?)\b/i);
+  let website = urlMatch ? urlMatch[0] : '';
+  if (website && email && website.includes(email.split('@')[1]) && !/^https?:/i.test(website) && website.split('.').length <= 2) {
+    // Avoid mistaking the email domain fragment for a website when it's not a real match
+  }
+
+  const usedLines = new Set();
+  const isNoise = (line) => {
+    if (email && line.includes(email)) return true;
+    if (website && line.includes(website)) return true;
+    if (phones.some(p => line.includes(p))) return true;
+    return false;
+  };
+
+  let title = '';
+  let company = '';
+  let name = '';
+  let address = [];
+
+  for (const line of lines) {
+    if (usedLines.has(line) || isNoise(line)) continue;
+    const lower = line.toLowerCase();
+    if (!title && TITLE_WORDS.some(w => lower.includes(w))) {
+      title = line;
+      usedLines.add(line);
     }
   }
 
-  function fillForm(f) {
-    document.getElementById('f-name').value = f.name || '';
-    document.getElementById('f-title').value = f.title || '';
-    document.getElementById('f-company').value = f.company || '';
-    document.getElementById('f-phone1').value = f.phone1 || '';
-    document.getElementById('f-phone2').value = f.phone2 || '';
-    document.getElementById('f-email').value = f.email || '';
-    document.getElementById('f-website').value = f.website || '';
-    document.getElementById('f-address').value = f.address || '';
-  }
-
-  function readForm() {
-    return {
-      name: document.getElementById('f-name').value.trim(),
-      title: document.getElementById('f-title').value.trim(),
-      company: document.getElementById('f-company').value.trim(),
-      phone1: document.getElementById('f-phone1').value.trim(),
-      phone2: document.getElementById('f-phone2').value.trim(),
-      email: document.getElementById('f-email').value.trim(),
-      website: document.getElementById('f-website').value.trim(),
-      address: document.getElementById('f-address').value.trim()
-    };
-  }
-
-  function downscaleCanvas(canvas, maxWidth) {
-    if (canvas.width <= maxWidth) return canvas;
-    const scale = maxWidth / canvas.width;
-    const out = document.createElement('canvas');
-    out.width = maxWidth;
-    out.height = Math.round(canvas.height * scale);
-    out.getContext('2d').drawImage(canvas, 0, 0, out.width, out.height);
-    return out;
-  }
-
-  function saveContact() {
-    const fields = readForm();
-    if (!fields.name) {
-      toast('Please enter at least a name.');
-      return;
+  for (const line of lines) {
+    if (usedLines.has(line) || isNoise(line)) continue;
+    const lower = line.toLowerCase();
+    if (!company && COMPANY_WORDS.some(w => lower.includes(w))) {
+      company = line;
+      usedLines.add(line);
     }
-    const vcard = buildVCard(fields, photoBase64Jpeg);
-    const blob = new Blob([vcard], { type: 'text/vcard' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${fields.name.replace(/[^a-z0-9]+/gi, '_') || 'contact'}.vcf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
-
-    Store.add({ type: 'card', title: fields.name });
-    toast('Contact file downloaded — tap it to add to Contacts.');
   }
 
-  function bindEvents() {
-    cacheEls();
-
-    els.shutter.addEventListener('click', () => {
-      if (!Camera.stream) return;
-      handleCanvas(Camera.capture());
-    });
-
-    els.pickFile.addEventListener('click', () => els.fileInput.click());
-    els.fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const canvas = await fileToCanvas(file);
-      handleCanvas(canvas);
-      e.target.value = '';
-    });
-
-    els.rawToggle.addEventListener('click', () => {
-      els.rawText.classList.toggle('show');
-      els.rawToggle.textContent = els.rawText.classList.contains('show')
-        ? 'Hide recognized text' : 'Show recognized text';
-    });
-
-    els.saveBtn.addEventListener('click', saveContact);
-    els.retakeBtn.addEventListener('click', () => start());
+  for (const line of lines) {
+    if (usedLines.has(line) || isNoise(line)) continue;
+    const hasDigits = /\d/.test(line);
+    const isAddressish = AU_STATES.some(s => new RegExp(`\\b${s}\\b`).test(line)) || /\b\d{4}\b/.test(line) ||
+      /\b(street|st\.?|road|rd\.?|avenue|ave\.?|drive|dr\.?|lane|ln\.?|highway|hwy|suite|level|floor)\b/i.test(line);
+    if (isAddressish) {
+      address.push(line);
+      usedLines.add(line);
+    }
   }
 
-  function fileToCanvas(file) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        URL.revokeObjectURL(img.src);
-        resolve(canvas);
-      };
-      img.src = URL.createObjectURL(file);
-    });
+  // First remaining short, digit-free line is the most likely candidate for a person's name.
+  for (const line of lines) {
+    if (usedLines.has(line) || isNoise(line)) continue;
+    const wordCount = line.split(' ').length;
+    if (!/\d/.test(line) && wordCount >= 2 && wordCount <= 4 && line.length <= 40) {
+      name = line;
+      usedLines.add(line);
+      break;
+    }
   }
 
-  document.addEventListener('DOMContentLoaded', bindEvents);
+  if (!company) {
+    // Fall back to the longest remaining unclassified line.
+    const rest = lines.filter(l => !usedLines.has(l) && !isNoise(l));
+    if (rest.length) {
+      company = rest.sort((a, b) => b.length - a.length)[0];
+      usedLines.add(company);
+    }
+  }
 
-  return { start, reset };
-})();
+  if (!name) {
+    const rest = lines.filter(l => !usedLines.has(l) && !isNoise(l));
+    if (rest.length) name = rest[0];
+  }
 
-window.CardScanner = CardScanner;
+  return {
+    name: name || '',
+    title: title || '',
+    company: company || '',
+    phone1: phones[0] || '',
+    phone2: phones[1] || '',
+    email: email || '',
+    website: website || '',
+    address: address.join(', '),
+    rawText
+  };
+}
+
+function dedupe(arr) {
+  const seen = new Set();
+  return arr.filter(x => {
+    const key = x.replace(/\D/g, '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildVCard(fields, photoBase64) {
+  const nameParts = (fields.name || '').trim().split(' ');
+  const first = nameParts.slice(0, -1).join(' ') || fields.name || '';
+  const last = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+
+  const lines = ['BEGIN:VCARD', 'VERSION:3.0'];
+  lines.push(`N:${escapeVCard(last)};${escapeVCard(first)};;;`);
+  lines.push(`FN:${escapeVCard(fields.name || 'Unknown')}`);
+  if (fields.company) lines.push(`ORG:${escapeVCard(fields.company)}`);
+  if (fields.title) lines.push(`TITLE:${escapeVCard(fields.title)}`);
+  if (fields.phone1) lines.push(`TEL;TYPE=CELL:${fields.phone1}`);
+  if (fields.phone2) lines.push(`TEL;TYPE=WORK:${fields.phone2}`);
+  if (fields.email) lines.push(`EMAIL:${fields.email}`);
+  if (fields.website) lines.push(`URL:${fields.website.replace(/^(?!https?:\/\/)/, 'https://')}`);
+  if (fields.address) lines.push(`ADR;TYPE=WORK:;;${escapeVCard(fields.address)};;;;`);
+  lines.push(`NOTE:Scanned with Card & Doc Scanner on ${new Date().toLocaleDateString()}`);
+  if (photoBase64) lines.push(`PHOTO;ENCODING=b;TYPE=JPEG:${photoBase64}`);
+  lines.push('END:VCARD');
+  return lines.join('\r\n');
+}
+
+function escapeVCard(str) {
+  return String(str).replace(/([,;\\])/g, '\\$1');
+}
+
+if (typeof window !== 'undefined') {
+  window.OCR = OCR;
+  window.extractContact = extractContact;
+  window.buildVCard = buildVCard;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { extractContact, buildVCard };
+}
