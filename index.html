@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Scanner">
+<meta name="theme-color" content="#0a1428">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Card & Doc Scanner</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===================== HOME ===================== -->
+  <section id="view-home" class="view active">
+    <div class="home-header">
+      <div class="badge"><span class="dot"></span> ON-DEVICE · PRIVATE</div>
+      <h1>Card &amp; Doc Scanner</h1>
+      <p>Scan business cards to Contacts, and paper documents to PDF</p>
+    </div>
+
+    <div class="mode-grid">
+      <button class="mode-card" id="btn-mode-card">
+        <div class="mode-icon blue">👤</div>
+        <div>
+          <h3>Scan Business Card</h3>
+          <p>Photograph a card, auto-fill contact details, save to your iPhone.</p>
+        </div>
+        <span class="chev">›</span>
+      </button>
+
+      <button class="mode-card" id="btn-mode-doc">
+        <div class="mode-icon green">📄</div>
+        <div>
+          <h3>Scan Document</h3>
+          <p>Capture A4 pages, enhance, combine into a PDF, share by email.</p>
+        </div>
+        <span class="chev">›</span>
+      </button>
+    </div>
+
+    <div class="recent-section">
+      <div class="section-label">Recent</div>
+      <div class="recent-list" id="recent-list"></div>
+    </div>
+  </section>
+
+  <!-- ===================== BUSINESS CARD ===================== -->
+  <section id="view-card" class="view">
+    <div class="topbar">
+      <button class="icon-btn" data-nav-home>‹</button>
+      <h2>Business Card</h2>
+    </div>
+
+    <!-- Step 1: capture -->
+    <div id="card-step-capture">
+      <div class="camera-wrap">
+        <video id="card-video" playsinline muted autoplay></video>
+        <div class="viewfinder"></div>
+        <div class="camera-hint">Fill the frame with the card, then tap capture</div>
+      </div>
+      <div class="camera-controls">
+        <button class="cam-side-btn" id="card-pick-file">🖼️</button>
+        <button class="shutter-btn" id="card-shutter"></button>
+        <span style="width:44px"></span>
+      </div>
+      <div class="status-line" id="card-cam-status"></div>
+      <input type="file" id="card-file-input" accept="image/*" capture="environment" style="display:none">
+    </div>
+
+    <!-- Step 2: review extracted fields -->
+    <div id="card-step-review" style="display:none; flex:1; flex-direction:column;">
+      <div class="card-photo-preview"><img id="card-photo-img" alt="Captured card"></div>
+
+      <div class="ocr-raw-toggle" id="card-raw-toggle">Show recognized text</div>
+      <div class="ocr-raw-text" id="card-raw-text"></div>
+
+      <div class="form-card">
+        <div class="field"><label>Full Name</label><input id="f-name" type="text" placeholder="Jane Smith"></div>
+        <div class="field"><label>Job Title</label><input id="f-title" type="text" placeholder="Marketing Manager"></div>
+        <div class="field"><label>Company</label><input id="f-company" type="text" placeholder="Company Pty Ltd"></div>
+        <div class="field-row">
+          <div class="field"><label>Mobile</label><input id="f-phone1" type="tel" placeholder="04xx xxx xxx"></div>
+          <div class="field"><label>Work Phone</label><input id="f-phone2" type="tel" placeholder="(0x) xxxx xxxx"></div>
+        </div>
+        <div class="field"><label>Email</label><input id="f-email" type="email" placeholder="name@company.com"></div>
+        <div class="field"><label>Website</label><input id="f-website" type="text" placeholder="www.company.com"></div>
+        <div class="field"><label>Address</label><textarea id="f-address" placeholder="Street, Suburb, State, Postcode"></textarea></div>
+      </div>
+
+      <div class="footer-actions">
+        <button class="btn btn-primary" id="card-save-btn">Save to Contacts</button>
+        <button class="btn btn-secondary" id="card-retake-btn">Retake Photo</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== DOCUMENT ===================== -->
+  <section id="view-doc" class="view">
+    <div class="topbar">
+      <button class="icon-btn" data-nav-home>‹</button>
+      <h2>Document Scan</h2>
+    </div>
+
+    <!-- Step 1: capture pages -->
+    <div id="doc-step-capture">
+      <div class="camera-wrap">
+        <video id="doc-video" playsinline muted autoplay></video>
+        <div class="viewfinder"></div>
+        <div class="camera-hint">Line the page up inside the frame</div>
+      </div>
+      <div class="camera-controls">
+        <button class="cam-side-btn" id="doc-pick-file">🖼️</button>
+        <button class="shutter-btn" id="doc-shutter"></button>
+        <button class="cam-side-btn" id="doc-toggle-bw" title="Toggle black & white enhance">B/W</button>
+      </div>
+      <div class="status-line" id="doc-cam-status"></div>
+      <input type="file" id="doc-file-input" accept="image/*" capture="environment" style="display:none">
+
+      <div class="page-strip" id="doc-page-strip"></div>
+
+      <div class="footer-actions" id="doc-capture-actions" style="display:none;">
+        <button class="btn btn-primary" id="doc-finish-btn">Create PDF (<span id="doc-page-count">0</span> pages)</button>
+      </div>
+    </div>
+
+    <!-- Step 2: PDF preview -->
+    <div id="doc-step-preview" style="display:none; flex:1; flex-direction:column;">
+      <div class="pdf-preview-wrap"><iframe id="doc-pdf-frame"></iframe></div>
+      <div class="footer-actions">
+        <button class="btn btn-primary" id="doc-share-btn">Share / Email PDF</button>
+        <button class="btn btn-secondary" id="doc-download-btn">Download PDF</button>
+        <button class="btn btn-secondary" id="doc-backedit-btn">Back to Pages</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="spinner"></div>
+  <p id="overlay-text">Working…</p>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="js/app.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/ocr.js"></script>
+<script src="js/card.js"></script>
+<script src="js/document.js"></script>
+</body>
+</html>
